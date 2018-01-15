@@ -145,6 +145,61 @@ class SweepData:
         """create spline interpolation for future use"""
         self.func = interpolate.splrep(self.freq, self.amp, s = 0)
 
+class TEPolCalculator:
+    def __init__(self):
+        # constants
+        ## spline function for low pressure 0.0009 < P < 0.826
+        self.loPrange = (0.0009, 0.826)
+        self.loT = np.array([.650, .7, .75, .8, .85, .9, .95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25])
+        self.loP = np.array([1.101e-01, 2.923e-01, 6.893e-01, 1.475, 2.914, 5.380, 9.381, 15.58, 24.79, 38.02, 56.47, 81.52, 114.7])
+        self.loTfunc = interpolate.splrep(self.loP, self.loT, s = 0)
+
+        ## poly function for medium pressure 0.826 < P < 37.82
+        self.mePrange = (0.826, 37.82)
+        self.mePara = np.array([1.392408, 0.527153, 0.166756, 0.050988, 0.026514, 0.001975, -.017976, 0.005409, 0.013259, 0.0])
+        self.meConst1 = 5.6
+        self.meConst2 = 2.9
+
+        ## poly function for high pressure 37.82 < P < 1471.
+        self.hiPrange = (27.82, 1471.)
+        self.hiPara = np.array([3.146631, 1.357655, 0.413923, 0.091159, 0.016349, 0.001826, -.004325, -.004973, 0.0, 0.0])
+        self.hiConst1 = 10.3
+        self.hiConst2 = 1.9
+
+        ## other consts
+        self.proton_g = 5.585694702
+        self.neutron_g = -3.82608545
+        self.deutron_g = 0.85741
+        self.nucleon_mag_moment = 5.05078353e-27
+        self.boltzmann = 1.38064852e-23
+        self.P_factor = self.nucleon_mag_moment*self.proton_g/self.boltzmann
+        self.D_factor = self.nucleon_mag_moment*self.deutron_g/self.boltzmann
+
+    def calcTEPol(self, P, B = 5., spin = 0.5, par = 'P'):
+        T = self.calcT(P)
+        if T < 0.:
+            return 0.
+    
+        arg1 = (2.*spin + 1.)/spin/2.
+        arg2 = 1./spin/2.
+        fact = 0.
+        if par == 'P':
+            fact = self.P_factor*spin*B/T
+        elif par == 'D':
+            fact = self.D_factor*spin*B/T
+
+        return arg1*np.cosh(arg1*fact)/np.sinh(arg1*fact) - arg2*np.cosh(arg2*fact)/np.sinh(arg2*fact)
+
+    def calcT(self, P):
+        if P >= self.loPrange[0] and P < self.loPrange[1]:
+            return float(interpolate.splev(P*133.322, self.loTfunc, der = 0))
+        elif P >= self.mePrange[0] and P < self.mePrange[1]:
+            return np.polynomial.polynomial.polyval((np.log(P*133.322) - self.meConst1)/self.meConst2, self.mePara)
+        elif P >= self.hiPrange[0] and P < self.hiPrange[1]:
+            return np.polynomial.polynomial.polyval((np.log(P*133.322) - self.hiConst1)/self.hiConst2, self.hiPara)
+        else:
+            return -1.
+
 class NMRFastAna:
 
     def __init__(self, options):
@@ -300,7 +355,7 @@ class NMRFastAna:
         chi2[2] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit3))**2).sum()#/(xdata.size - 4)
 
         index = chi2.index(min(chi2))
-        return [pfit1, pfit2, pfit3][index]
+        return [pfit1, pfit2, pfit3][index], min(chi2)
 
     def qCurveSubtract(self):
         """with the adjusted Q curve info, make the Q curve subtraction and then the sideband spline subtraction"""
@@ -335,7 +390,7 @@ class NMRFastAna:
             self.sidebandF = interpolate.splrep(self.sidebandX, self.sidebandY, s = 1, k = 3)
             centerY = self.subtractedY - interpolate.splev(self.subtractedX, self.sidebandF, der = 0)
         else:
-            self.sidebandP = self.polfit(self.sidebandX, self.sidebandY)
+            self.sidebandP, _ = self.polfit(self.sidebandX, self.sidebandY)
             centerY = self.subtractedY - np.polynomial.polynomial.polyval(self.subtractedX, self.sidebandP)
 
         paddingL = np.array([f for f in self.data.freq if f < self.subtractedX.min()])

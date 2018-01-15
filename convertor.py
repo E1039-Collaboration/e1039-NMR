@@ -19,5 +19,5 @@ for i in inputs:
     contents = [a.strip() for a in i.split(',')]
     s = NMRFastAna.SweepData(qfile = options.qcv, ts = int(contents[0]), amps = contents[1:])
 
-    outputf.write(s.longString() + '\n')
+    outputf.write(s.longString())
 outputf.close()
