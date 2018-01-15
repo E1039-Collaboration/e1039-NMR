@@ -45,16 +45,14 @@ for idx,te in enumerate(teData):
             print '-------', i
             ana.setData(data[i])
             ana.setQcurve('auto')
-            #ana.freqWin = 0.25
             #ana.qCurveAdjust()
             ana.qCurveSubtract()
             if i % options.freq == 0:
                 ana.plot(plotDir, te.replace('.csv', '') + '_' + str(i))
-            #print ana.signal.shortString()
 
             pol = 0.
             if options.type == 'TEQ':
-                pol = tecalc.calcTEPol(data[i].HePress)
+                pol = tecalc.calcTEPol(data[i].HePress*1.01 - 0.1204)
 
             logfile.write('%s   %s      %d    %.4f      %.4e      %.4e      %.4e     %.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol))
     except Exception, err:
