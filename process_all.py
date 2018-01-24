@@ -36,30 +36,34 @@ for idx,te in enumerate(teData):
     print te
     try:
         data = NMRFastAna.parseSweepFile(os.path.join(dataDir, te), True)
+        #data = [NMRFastAna.parseSweepFile(os.path.join(dataDir, te))]
     except Exception, err:
         logfile.write('%s     %s\n' % (te, err))
         continue
 
     try:
         for i in range(len(data)):
-            print '-------', i
             ana.setData(data[i])
             ana.setQcurve('auto')
             #ana.qCurveAdjust()
             ana.qCurveSubtract()
             if i % options.freq == 0:
+                print 'Processing sweep', data[i].sweepID
                 ana.plot(plotDir, te.replace('.csv', '') + '_' + str(i))
 
             pol = 0.
             if options.type == 'TEQ':
                 pol = tecalc.calcTEPol(data[i].HePress*1.01 - 0.1204)
 
-            logfile.write('%s   %s      %d    %.4f      %.4e      %.4e      %.4e     %.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol))
+            logfile.write('%s,%s,%d,%.4f,%.4e,%.4e,%.4e,%.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol))
     except Exception, err:
         print te, err
 
-    #dataAvg = NMRFastAna.parseSweepFile(os.path.join(dataDir, te))
-    #ana.setData()
+    dataAvg = NMRFastAna.parseSweepFile(os.path.join(dataDir, te))
+    ana.setData(dataAvg)
+    ana.qCurveSubtract()
+    ana.plot(plotDir, te.replace('.csv', '') + '_avg')
+    print ana.signal.integral
 
     logfile.flush()
 

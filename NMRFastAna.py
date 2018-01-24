@@ -101,7 +101,7 @@ class SweepData:
         self.peakIdx = np.argmax(self.amp)
         self.peakX = self.freq[self.peakIdx]
         self.peakY = self.amp[self.peakIdx]*SweepData.gain_value[self.gain]
-        
+
         # basic sanity check
         assert self.amp.size == self.nSteps, 'step size in header does not match data'
         assert self.nSteps > 50, 'number of steps too small'
@@ -179,7 +179,7 @@ class TEPolCalculator:
         T = self.calcT(P)
         if T < 0.:
             return 0.
-    
+
         arg1 = (2.*spin + 1.)/spin/2.
         arg2 = 1./spin/2.
         fact = 0.
@@ -202,7 +202,7 @@ class TEPolCalculator:
 
 class NMRFastAna:
 
-    def __init__(self, options):
+    def __init__(self, options = None):
         self.freqCenter = 213.
         self.freqWin = 0.25
         self.freqMin = 212.65
@@ -225,9 +225,10 @@ class NMRFastAna:
         self.ref = None
 
         # file name and path of the QCV file
-        self.refFile = ''
-        self.refPath = options.qcvpath
-        self.refDefaultFile = options.qcvfile
+        if options is not None:
+            self.refFile = ''
+            self.refPath = options.qcvpath
+            self.refDefaultFile = options.qcvfile
 
         # q curve subtracted data
         self.subtractedX = None
@@ -241,7 +242,9 @@ class NMRFastAna:
         self.sidebandP = None   # polymonial function for sideband
 
         # bkg-subtraction mode
-        self.mode = options.mode
+        self.mode = 'spline'
+        if options is not None:
+            self.mode = options.mode
 
         # pure signal after furture background subtraction with spline, in the form of SweepData
         self.signal = None
@@ -260,7 +263,7 @@ class NMRFastAna:
 
         avgSweep.amp = avgSweep.amp/(len(self.results) - id_start)
         return avgSweep
-        
+
 
     def setQcurve(self, qfile):
         """read the Q curve file, if input file set to auto, it will read the q curve file specified in data header instead. return True if succeeded"""
@@ -285,7 +288,10 @@ class NMRFastAna:
         self.yOffset = 0.
 
         self.freqCenter = 0.5*(self.data.signalL + self.data.signalH)
-        self.freqwin    = 0.5*(self.data.signalH - self.data.signalL)
+        self.freqWin    = 0.5*(self.data.signalH - self.data.signalL)
+
+        self.freqMin = self.data.freq[0]
+        self.freqMax = self.data.freq[-1]
 
         # check if it's from a new run
         if len(self.results) > 0 and self.data.sweepID < self.results[-1].sweepID:
@@ -310,7 +316,7 @@ class NMRFastAna:
 
         freq = np.array([f for f in np.linspace(self.freqAdjMin, self.freqAdjMax, num = nSamples, endpoint = False) if abs(f - self.freqCenter) > self.freqWin])
         chi2 = ((interpolate.splev(freq, self.data.func, der = 0) - (interpolate.splev(freq - x, self.ref.func, der = 0) + y))**2).sum()/freq.size
-        
+
         return chi2
 
     def qCurveAdjust(self):
@@ -350,12 +356,84 @@ class NMRFastAna:
 
         pfit2, _ = curve_fit(self.pol2, xdata, ydata, p0 = [0., 0., 0.])
         chi2[1] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit2))**2).sum()#/(xdata.size - 3)
-        
+
         pfit3, _ = curve_fit(self.pol3, xdata, ydata, p0 = [0., 0., 0., 0.])
         chi2[2] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit3))**2).sum()#/(xdata.size - 4)
 
         index = chi2.index(min(chi2))
         return [pfit1, pfit2, pfit3][index], min(chi2)
+
+    def smoothArray(self, xx):
+        """Implementation of HBOOK 353QH algorithm, ref: Proc.of the 1974 CERN School of Computing, Norway, 11-24 August, 1974. page 293"""
+        # only applicable to size > 3 array
+        nn = xx.size
+        if nn < 3:
+            return
+
+        # temp arraies
+        yy = np.zeros(xx.size)
+        zz = xx.copy()
+        rr = np.zeros(xx.size)
+
+        # 353QH twicing
+        for i in range(2):
+            # 3, 5, 3 running medians
+            for j in range(3):
+                np.copyto(yy, zz)
+
+                # 3 or 5 median
+                medianWin = 1
+                ifirst = 1
+                ilast = nn - 1
+                if j == 1:
+                    medianWin = 2
+                    ifirst = 2
+                    ilast = nn - 2
+
+                # the middle range
+                for k in range(ifirst, ilast):
+                    zz[k] = np.median(yy[range(k-medianWin, k+medianWin+1)])
+
+                # the edge case
+                if j == 0: # first 3-median
+                    zz[0] = np.median([zz[0], zz[1], 3.*zz[1] - 2.*zz[2]])
+                    zz[nn-1] = np.median([zz[nn-2], zz[nn-1], 3.*zz[nn-2] - 2.*zz[nn-3]])
+                elif j == 1:
+                    zz[1] = np.median([yy[0], yy[1], yy[2]])
+                    zz[nn-2] = np.median([yy[nn-3], yy[nn-2], yy[nn-1]])
+
+            # update the temp array
+            np.copyto(yy, zz)
+
+            # quadratic interpolation on flat segments
+            for j in range(2, nn-2):
+                if zz[j-1] != zz[j] or zz[j] != zz[j+1]:
+                    continue
+
+                hh0 = zz[j-2] - zz[j]
+                hh1 = zz[j+2] - zz[j]
+                if hh0*hh1 <= 0:
+                    continue
+
+                jk = 1
+                if abs(hh1) > abs(hh0):
+                    jk = -1
+
+                yy[j] = -0.5*zz[j-2*jk] + zz[j]/0.75 + zz[j+2*jk]/6.
+                yy[j+jk] = 0.5*(zz[j+2*jk] - zz[j-2*jk]) + zz[j]
+
+            # running means
+            for j in range(1, nn-1):
+                zz[j] = 0.25*yy[j-1] + 0.5*yy[j] + 0.25*yy[j+1]
+            zz[0] = yy[0]
+            zz[nn-1] = yy[nn-1]
+
+            # if it's the first run
+            if i == 0:
+                np.copyto(rr, zz)
+                zz = xx - zz
+
+        xx[:] = zz + rr
 
     def qCurveSubtract(self):
         """with the adjusted Q curve info, make the Q curve subtraction and then the sideband spline subtraction"""
@@ -451,7 +529,7 @@ class NMRFastAna:
 
 def recvall(conn, timeout):
     conn.setblocking(0)
-    
+
     dataIn = ''
     beginT = time.time()
     while True:
@@ -482,7 +560,7 @@ def main(options):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind((options.host, options.port))
     except:
-        print timestamp(), 'WARNING: port %d is being used. Exit now.' % options.port
+        print timestamp(), 'ERROR: port %d is being used. Exit now.' % options.port
         sys.exit(0)
     sock.listen(5)
 
@@ -504,6 +582,11 @@ def main(options):
                 print timestamp(), 'WARNING: connection lost, waiting for another ...'
                 break
 
+            if 'test' in dataIn.lower():
+                print timestamp(), 'INFO: received test command, reply OK.'
+                conn.sendall('ok?')
+                continue
+
             start_time = time.time()
             try:
                 data = SweepData(dataIn)
@@ -512,21 +595,17 @@ def main(options):
                 fastAna.setQcurve('auto')
             except Exception, err:
                 print timestamp(), 'I/O Error: ', err
-                
+
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
                 continue
-
-            fastAna.freqWin = 0.25
-            if 'pol' in dataIn.lower():
-                fastAna.freqWin = 0.2
 
             try:
                 #fastAna.qCurveAdjust()
                 fastAna.qCurveSubtract()
             except Exception, err:
                 print timestamp(), 'Analysis Error: ', err
-                
+
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
                 continue
