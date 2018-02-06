@@ -51,11 +51,14 @@ for idx,te in enumerate(teData):
                 print 'Processing sweep', data[i].sweepID
                 ana.plot(plotDir, te.replace('.csv', '') + '_' + str(i))
 
+            signalslice = np.array([x for x in range(data[i].freq.size) if data[i].freq[x] > data[i].signalL and data[i].freq[x] < data[i].signalH])
+            raw = data[i].amp[signalslice].sum()*data[i].stepSize
+
             pol = 0.
-            if options.type == 'TEQ':
+            if 'TEQ' in te:
                 pol = tecalc.calcTEPol(data[i].HePress*1.01 - 0.1204)
 
-            logfile.write('%s,%s,%d,%.4f,%.4e,%.4e,%.4e,%.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol))
+            logfile.write('%s,%s,%d,%.4f,%.4e,%.4e,%.4e,%.4e,%.4e,%.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol, ana.signal.HMR-ana.signal.HML,raw))
     except Exception, err:
         print te, err
 

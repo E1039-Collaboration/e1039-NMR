@@ -23,7 +23,6 @@ def parseSweepFile(filename, full = False):
         return SweepData('\n'.join([line.strip() for line in open(filename)]))
     else: # if AVE file does not exist, try the original one and calculate the average myself ...
         filename = filename.replace('AVE', '')
-
         contents = [line.strip() for line in open(filename)]
 
         index = 0
@@ -64,6 +63,8 @@ class SweepData:
             fakeHeader[15] = '%.4f' % ts
             fakeHeader[33] = '1.0000'
             fakeHeader[34] = '1.0000'
+            fakeHeader[10] = '0.0000'
+            fakeHeader[11] = '0.0000'
 
             inputStr = '\n'.join(fakeHeader+amps+[amps[-1]])  # Attention, compensate for the last point
 
@@ -83,6 +84,8 @@ class SweepData:
         self.sweepID    = int(float(info[15]))
         self.HeTemp     = float(info[33])
         self.HePress    = float(info[34])
+        self.timeH      = int(float(info[10]))
+        self.timeL      = int(float(info[11]))
         try:
             self.signalL    = float(info[8])
             self.signalH    = float(info[9])
@@ -101,6 +104,8 @@ class SweepData:
         self.peakIdx = np.argmax(self.amp)
         self.peakX = self.freq[self.peakIdx]
         self.peakY = self.amp[self.peakIdx]*SweepData.gain_value[self.gain]
+        self.HML   = self.peakX - 0.06   # if we consider the 0.2MHz is 3sigma
+        self.HMR   = self.peakX + 0.06
 
         # basic sanity check
         assert self.amp.size == self.nSteps, 'step size in header does not match data'
@@ -123,6 +128,9 @@ class SweepData:
 
         self.peakX = (self.freq[peakSlice]*self.amp[peakSlice]).sum()/self.amp[peakSlice].sum()
         self.peakY = np.interp(self.peakX, self.freq, self.amp)*SweepData.gain_value[self.gain]
+
+        uspline = interpolate.UnivariateSpline(self.freq, self.amp - 0.5*self.peakY, s = 0)
+        self.HML, self.HMR = uspline.roots()
 
     def shortString(self):
         """return the data plus a short header: 1. number of points; 2. starting frequency; 3. frequency step; 4. the integral of the curve"""
@@ -225,8 +233,10 @@ class NMRFastAna:
         self.ref = None
 
         # file name and path of the QCV file
+        self.refFile = ''
+        self.refPath = ''
+        self.refDefaultFile = ''
         if options is not None:
-            self.refFile = ''
             self.refPath = options.qcvpath
             self.refDefaultFile = options.qcvfile
 
@@ -439,11 +449,13 @@ class NMRFastAna:
         """with the adjusted Q curve info, make the Q curve subtraction and then the sideband spline subtraction"""
         self.freqAdjMin, self.freqAdjMax = self.range()
 
+        # subtract Q curve from the data
         subtractedSlice = np.array([i for i in range(self.data.freq.size) if self.data.freq[i] > self.freqAdjMin and self.data.freq[i] < self.freqAdjMax])
         self.subtractedX = self.data.freq[subtractedSlice]
         self.subtractedY = self.data.amp[subtractedSlice] - interpolate.splev(self.subtractedX - self.xOffset, self.ref.func, der = 0) - self.yOffset
         #self.subtractedF = interpolate.splrep(self.subtractedX, self.subtractedY, s = 0)
 
+        # smooth the left and right sideband
         sampleRate = int(self.sampleSize/self.data.stepSize)
         if sampleRate < 1:
             sampleRate = 1
@@ -451,18 +463,22 @@ class NMRFastAna:
         RsidebandSliceL  = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if adjustedCenter - self.subtractedX[i] > self.freqWin])
         RsidebandSliceR  = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if self.subtractedX[i] - adjustedCenter > self.freqWin])
 
-        sidebandMeanL = self.subtractedY[RsidebandSliceL].mean()
-        sidebandSigmaL = self.subtractedY[RsidebandSliceL].std()
-        sidebandMeanR = self.subtractedY[RsidebandSliceR].mean()
-        sidebandSigmaR = self.subtractedY[RsidebandSliceR].std()
-
-        sidebandSliceL = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if adjustedCenter - self.subtractedX[i] > self.freqWin and abs(self.subtractedY[i] - sidebandMeanL) < 2.*sidebandSigmaL])
-        sidebandSliceR = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if self.subtractedX[i] - adjustedCenter > self.freqWin and abs(self.subtractedY[i] - sidebandMeanR) < 2.*sidebandSigmaR])
-        sidebandSlice = np.concatenate((sidebandSliceL, sidebandSliceR))
+        #sidebandMeanL = self.subtractedY[RsidebandSliceL].mean()
+        #sidebandSigmaL = self.subtractedY[RsidebandSliceL].std()
+        #sidebandMeanR = self.subtractedY[RsidebandSliceR].mean()
+        #sidebandSigmaR = self.subtractedY[RsidebandSliceR].std()
+        #sidebandSliceL = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if adjustedCenter - self.subtractedX[i] > self.freqWin and abs(self.subtractedY[i] - sidebandMeanL) < 2.*sidebandSigmaL])
+        #sidebandSliceR = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if self.subtractedX[i] - adjustedCenter > self.freqWin and abs(self.subtractedY[i] - sidebandMeanR) < 2.*sidebandSigmaR])
+        sidebandSlice = np.concatenate((RsidebandSliceL, RsidebandSliceR))
 
         self.sidebandX = self.subtractedX[sidebandSlice]
         self.sidebandY = self.subtractedY[sidebandSlice]
 
+        # 353QH smoothing
+        self.smoothArray(self.sidebandY[:RsidebandSliceL.size])
+        self.smoothArray(self.sidebandY[RsidebandSliceL.size+1:])
+
+        # subtract either interpolated/fitted sideband from Q-curve-subtracted data
         self.signal = copy.deepcopy(self.data)
         if self.mode == 'spline':
             self.sidebandF = interpolate.splrep(self.sidebandX, self.sidebandY, s = 1, k = 3)
@@ -471,18 +487,20 @@ class NMRFastAna:
             self.sidebandP, _ = self.polfit(self.sidebandX, self.sidebandY)
             centerY = self.subtractedY - np.polynomial.polynomial.polyval(self.subtractedX, self.sidebandP)
 
+        # add zeros on left/right if necessary to the data to match the input data length
         paddingL = np.array([f for f in self.data.freq if f < self.subtractedX.min()])
         paddingH = np.array([f for f in self.data.freq if f > self.subtractedX.max()])
         self.signal.freq = np.concatenate((paddingL, self.subtractedX, paddingH))
         self.signal.amp = np.concatenate((np.full(paddingL.size, 0.), centerY, np.full(paddingH.size, 0.)))
         self.signal.update()
 
+        # only integrate the curve inside the signal window
         signalSlice = np.array([i for i in range(self.subtractedX.size) if abs(self.subtractedX[i] - adjustedCenter) < self.freqWin])
         self.signal.integral = self.signal.amp[signalSlice].sum()*self.signal.stepSize
 
         # check the status of the bkg-subtraction
-        sidebandSlopeL = (self.subtractedY[sidebandSliceL[-1]] - self.subtractedY[sidebandSliceL[0]])/(self.subtractedX[sidebandSliceL[-1]] - self.subtractedX[sidebandSliceL[0]])
-        sidebandSlopeR = (self.subtractedY[sidebandSliceR[-1]] - self.subtractedY[sidebandSliceR[0]])/(self.subtractedX[sidebandSliceR[-1]] - self.subtractedX[sidebandSliceR[0]])
+        sidebandSlopeL = (self.subtractedY[RsidebandSliceL[-1]] - self.subtractedY[RsidebandSliceL[0]])/(self.subtractedX[RsidebandSliceL[-1]] - self.subtractedX[RsidebandSliceL[0]])
+        sidebandSlopeR = (self.subtractedY[RsidebandSliceR[-1]] - self.subtractedY[RsidebandSliceR[0]])/(self.subtractedX[RsidebandSliceR[-1]] - self.subtractedX[RsidebandSliceR[0]])
         if abs(sidebandSlopeL - sidebandSlopeR)/(abs(sidebandSlopeL) + abs(sidebandSlopeR)) < 1.:
             self.signal.status = 2
         else:
@@ -493,6 +511,7 @@ class NMRFastAna:
     def plot(self, path, prefix):
         saveprefix = os.path.join(path, prefix)
         freqaxis = np.linspace(self.freqAdjMin, self.freqAdjMax, num = 1000, endpoint = True)
+        freqaxis_short = np.linspace(self.signal.HML, self.signal.HMR, num = 100, endpoint = True)
 
         # raw data + raw q curve
         plt.figure(0)
@@ -517,6 +536,7 @@ class NMRFastAna:
         plt.figure(2)
         plt.plot(self.signal.freq, self.signal.amp, 'o-')
         plt.plot(self.signal.freq, np.zeros(self.signal.freq.size), '--', color = 'red')
+        plt.plot(freqaxis_short, np.full(freqaxis_short.size, self.signal.peakY*0.5), '--', color = 'red')
         plt.savefig(saveprefix + '_signal.png')
         plt.close()
 
@@ -526,6 +546,27 @@ class NMRFastAna:
         plt.plot(self.ref.freq + self.xOffset, self.scale*(self.ref.amp + self.yOffset), 'o', color = 'blue')
         plt.savefig(saveprefix + '_qadj.png')
         plt.close()
+
+    def summary(self, filename):
+        """Print the summary of the existing data at shutdown"""
+
+        now = datetime.now()
+        summaryPath = os.path.join(self.refPath.replace('config', '%02d' % now.day))
+        summaryFile = os.path.join(summaryPath, filename)
+
+        fout = open(summaryFile, 'w')
+        for res in self.results:
+            # format: sweepID, time1, time2, area, NMR temp, peakX, peakY, bkg-subtract quality
+            fout.write('%d,%d,%d,%.4e,%.4f,%.4e,%.4e,%.4e,%.4e,%d\n' % (res.sweepID, res.timeH, res.timeL, res.integral, res.temp, res.peakX, res.peakY, res.HML, res.HMR, res.status))
+        fout.close()
+
+def exceptionLogging(exc_type):
+    """print the exception info with details"""
+
+    _, exc_obj, tb = sys.exc_info()
+    lineno = tb.tb_lineno
+
+    print timestamp(), exc_type + ':', 'line %d' % lineno, exc_obj
 
 def recvall(conn, timeout):
     conn.setblocking(0)
@@ -571,30 +612,38 @@ def main(options):
         print timestamp(), 'INFO: connected from', client_address[0]
 
         # wait for incoming data indefinitely
+        idleCycle = 0
         while True:
             dataIn = recvall(conn, 1.)
 
             if 'shutdown' in dataIn.lower():
                 print timestamp(), 'INFO: received shutdown command, closing ...'
+                fastAna.summary('test.csv')
                 sys.exit(0)
 
             if dataIn == '':
-                print timestamp(), 'WARNING: connection lost, waiting for another ...'
-                break
+                idleCycle = idleCycle + 1
+                if idleCycle > 10:  # disconnect if not received data for a long time
+                    print timestamp(), 'WARNING: connection lost, waiting for another ...'
+                    conn.shutdown(socket.SHUT_RDWR)
+                    conn.close()
+                    break
+                continue
 
             if 'test' in dataIn.lower():
                 print timestamp(), 'INFO: received test command, reply OK.'
                 conn.sendall('ok?')
                 continue
 
+            idleCycle = 0  # reset idle cycle if received data again
             start_time = time.time()
             try:
                 data = SweepData(dataIn)
 
                 fastAna.setData(data)
                 fastAna.setQcurve('auto')
-            except Exception, err:
-                print timestamp(), 'I/O Error: ', err
+            except:
+                exceptionLogging('I/O ERROR')
 
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
@@ -603,8 +652,8 @@ def main(options):
             try:
                 #fastAna.qCurveAdjust()
                 fastAna.qCurveSubtract()
-            except Exception, err:
-                print timestamp(), 'Analysis Error: ', err
+            except:
+                exceptionLogging('Ana ERROR')
 
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
