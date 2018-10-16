@@ -50,7 +50,7 @@ class SweepData:
     def __init__(self, inputStr = '', qfile = '', ts = 0, center = 213., freqMin = 212.6, freqMax = 213.4, nSteps = 500, gain = 1, amps = []):
         """parse the input string and fill the header+data info"""
         if inputStr == '':  # if nothing is provided, put together a fake header
-            fakeHeader = ['' for i in range(35)]
+            fakeHeader = ['9999.9999' for i in range(35)]
             fakeHeader[0] = 'Data from UVa q-meter'
             fakeHeader[1] = qfile
             fakeHeader[3] = 'teq.csv'
@@ -130,7 +130,7 @@ class SweepData:
         self.peakY = np.interp(self.peakX, self.freq, self.amp)*SweepData.gain_value[self.gain]
 
         uspline = interpolate.UnivariateSpline(self.freq, self.amp - 0.5*self.peakY, s = 0)
-        self.HML, self.HMR = uspline.roots()
+        self.HML, self.HMR = uspline.roots()[:2]
 
     def shortString(self):
         """return the data plus a short header: 1. number of points; 2. starting frequency; 3. frequency step; 4. the integral of the curve"""
@@ -262,6 +262,9 @@ class NMRFastAna:
         # container of the results so far
         self.results = []
 
+        # flag about whether Q curve subtraction is needed
+        self.qcurveless = False
+
         self.minimizer = None
 
     def runningAvg(self, window = 10):
@@ -279,6 +282,11 @@ class NMRFastAna:
         """read the Q curve file, if input file set to auto, it will read the q curve file specified in data header instead. return True if succeeded"""
         if qfile == 'auto':
             qfile = self.data.QCurveFile
+
+        # if the Q curve file is ignore, run in qcurveless mode
+        if 'ignore' in qfile:
+            self.qcurveless = True
+            return
 
         # check if either AVE file or original file exists
         qfileAbs = os.path.join(self.refPath, qfile)
@@ -331,6 +339,9 @@ class NMRFastAna:
 
     def qCurveAdjust(self):
         """use sideband region for the Q curve adjustment"""
+        if self.qcurveless:
+            return
+
         self.minimizer = Minuit(self.chisq, x = self.xOffset, error_x = 0.1, limit_x = (self.xOffsetMin, self.xOffsetMax), y = self.yOffset, error_y = 0.1, limit_y = (self.yOffsetMin, self.yOffsetMax), errordef = 1, print_level = 0)
         self.minimizer.migrad()
         #self.minimizer.print_param()
@@ -452,7 +463,10 @@ class NMRFastAna:
         # subtract Q curve from the data
         subtractedSlice = np.array([i for i in range(self.data.freq.size) if self.data.freq[i] > self.freqAdjMin and self.data.freq[i] < self.freqAdjMax])
         self.subtractedX = self.data.freq[subtractedSlice]
-        self.subtractedY = self.data.amp[subtractedSlice] - interpolate.splev(self.subtractedX - self.xOffset, self.ref.func, der = 0) - self.yOffset
+        if self.qcurveless:
+            self.subtractedY = self.data.amp[subtractedSlice]
+        else:
+            self.subtractedY = self.data.amp[subtractedSlice] - interpolate.splev(self.subtractedX - self.xOffset, self.ref.func, der = 0) - self.yOffset
         #self.subtractedF = interpolate.splrep(self.subtractedX, self.subtractedY, s = 0)
 
         # smooth the left and right sideband
@@ -515,15 +529,15 @@ class NMRFastAna:
 
         # raw data + raw q curve
         plt.figure(0)
-        plt.plot(self.data.freq, self.data.amp, 'o', color = 'red')
-        plt.plot(self.ref.freq, self.ref.amp, 'o', color = 'blue')
+        plt.plot(self.data.freq, self.data.amp, '.', color = 'red')
+        plt.plot(self.ref.freq, self.ref.amp, '.', color = 'blue')
         plt.savefig(saveprefix + '_raw.png')
         plt.close()
 
         # bkg subtraction overlay -- focus on bkg
         plt.figure(1)
-        plt.plot(self.subtractedX, self.subtractedY, 'o')
-        plt.plot(self.sidebandX, self.sidebandY, 'o', color = 'red')
+        plt.plot(self.subtractedX, self.subtractedY, '.')
+        plt.plot(self.sidebandX, self.sidebandY, '.', color = 'red')
         if self.mode == 'spline':
             plt.plot(freqaxis, interpolate.splev(freqaxis, self.sidebandF, der = 0), lineStyle = '-', color = 'black')
         else:
@@ -534,7 +548,7 @@ class NMRFastAna:
 
         # pure signal
         plt.figure(2)
-        plt.plot(self.signal.freq, self.signal.amp, 'o-')
+        plt.plot(self.signal.freq, self.signal.amp, '.-')
         plt.plot(self.signal.freq, np.zeros(self.signal.freq.size), '--', color = 'red')
         plt.plot(freqaxis_short, np.full(freqaxis_short.size, self.signal.peakY*0.5), '--', color = 'red')
         plt.savefig(saveprefix + '_signal.png')
@@ -542,8 +556,8 @@ class NMRFastAna:
 
         # qcurve adjustment
         plt.figure(3)
-        plt.plot(self.data.freq, self.data.amp, 'o', color = 'red')
-        plt.plot(self.ref.freq + self.xOffset, self.scale*(self.ref.amp + self.yOffset), 'o', color = 'blue')
+        plt.plot(self.data.freq, self.data.amp, '.', color = 'red')
+        plt.plot(self.ref.freq + self.xOffset, self.scale*(self.ref.amp + self.yOffset), '.', color = 'blue')
         plt.savefig(saveprefix + '_qadj.png')
         plt.close()
 
