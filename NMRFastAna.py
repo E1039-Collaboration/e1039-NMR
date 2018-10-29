@@ -263,7 +263,9 @@ class NMRFastAna:
         self.results = []
 
         # flag about whether Q curve subtraction is needed
-        self.qcurveless = False
+        self.qcurveless = option.qcvless
+        if option is not None:
+            self.qcurveless = options.qcvless
 
         self.minimizer = None
 
@@ -282,6 +284,10 @@ class NMRFastAna:
         """read the Q curve file, if input file set to auto, it will read the q curve file specified in data header instead. return True if succeeded"""
         if qfile == 'auto':
             qfile = self.data.QCurveFile
+
+        # if the QCurveLess is specified earlier, just ignore
+        if self.qcurveless:
+            return
 
         # if the Q curve file is ignore, run in qcurveless mode
         if 'ignore' in qfile:
@@ -644,7 +650,7 @@ def main(options):
                     break
                 continue
 
-            if 'test' in dataIn.lower():
+            if 'testtesttest' in dataIn.lower():
                 print timestamp(), 'INFO: received test command, reply OK.'
                 conn.sendall('ok?')
                 continue
@@ -667,7 +673,7 @@ def main(options):
                 #fastAna.qCurveAdjust()
                 fastAna.qCurveSubtract()
             except:
-                exceptionLogging('Ana ERROR')
+                exceptionLogging('Analysis ERROR')
 
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
@@ -686,6 +692,7 @@ if __name__ == '__main__':
     parser.add_option('--port', type = 'int', dest = 'port', help = 'port number', default = 10000)
     parser.add_option('--log', type = 'string', dest = 'log', help = 'log file', default = '')
     parser.add_option('--mode', type = 'string', dest = 'mode', help = 'bkg subtraction method', default = 'spline')
+    parser.add_option('--qcvless', action = 'store_true', dest = 'qcvless', help = 'Enable the qcurve less mode', default = False)
     parser.add_option('--qcvpath', type = 'string', dest = 'qcvpath', help = 'path where qcv file is stored', default = './')
     parser.add_option('--qcvfile', type = 'string', dest = 'qcvfile', help = 'default qcurve file', default = 'QCV3563809315.csv')
     (options, args) = parser.parse_args()
