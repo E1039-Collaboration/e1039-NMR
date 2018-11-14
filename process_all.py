@@ -12,6 +12,7 @@ parser = OptionParser('Usage: %prog [options]')
 parser.add_option('--log', type = 'string', dest = 'log', help = 'log file', default = '')
 parser.add_option('--qcvpath', type = 'string', dest = 'qcvpath', help = 'path where qcv file is stored', default = './data')
 parser.add_option('--qcvfile', type = 'string', dest = 'qcvfile', help = 'default qcurve file', default = 'QCV3563809315.csv')
+parser.add_option('--qcvless', action = 'store_true', dest = 'qcvless', help = 'Enable the qcurve less mode', default = False)
 parser.add_option('--mode', type = 'string', dest = 'mode', help = 'bkg subtraction method', default = 'spline')
 parser.add_option('--path', type = 'string', dest = 'path', help = 'path to data', default = './data/')
 parser.add_option('--type', type = 'string', dest = 'type', help = 'Type of data', default = 'TEQ')
@@ -58,7 +59,7 @@ for idx,te in enumerate(teData):
             if 'TEQ' in te:
                 pol = tecalc.calcTEPol(data[i].HePress*1.01 - 0.1204)
 
-            logfile.write('%s,%s,%d,%.4f,%.4e,%.4e,%.4e,%.4e,%.4e,%.4e\n' % (te[8:13], te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol, ana.signal.HMR-ana.signal.HML,raw))
+            logfile.write('%s,%s,%d,%.4f,%.4e,%.4e,%.4e,%.4e,%.4e,%.4e,1\n' % (str(ana.data.timeL), te, i, ana.data.temp, ana.signal.peakX, ana.signal.peakY, ana.signal.integral, pol, ana.signal.HMR-ana.signal.HML,raw))
     except Exception, err:
         print te, err
 

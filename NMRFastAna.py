@@ -63,8 +63,8 @@ class SweepData:
             fakeHeader[15] = '%.4f' % ts
             fakeHeader[33] = '1.0000'
             fakeHeader[34] = '1.0000'
-            fakeHeader[10] = '0.0000'
-            fakeHeader[11] = '0.0000'
+            fakeHeader[10] = '%s.0000' % str(long(ts) + long(2082844800))[:5]
+            fakeHeader[11] = '%s.0000' % str(long(ts) + long(2082844800))[5:]
 
             inputStr = '\n'.join(fakeHeader+amps+[amps[-1]])  # Attention, compensate for the last point
 
@@ -263,8 +263,8 @@ class NMRFastAna:
         self.results = []
 
         # flag about whether Q curve subtraction is needed
-        self.qcurveless = option.qcvless
-        if option is not None:
+        self.qcurveless = False
+        if options is not None:
             self.qcurveless = options.qcvless
 
         self.minimizer = None
@@ -536,7 +536,8 @@ class NMRFastAna:
         # raw data + raw q curve
         plt.figure(0)
         plt.plot(self.data.freq, self.data.amp, '.', color = 'red')
-        plt.plot(self.ref.freq, self.ref.amp, '.', color = 'blue')
+        if not self.qcurveless:
+            plt.plot(self.ref.freq, self.ref.amp, '.', color = 'blue')
         plt.savefig(saveprefix + '_raw.png')
         plt.close()
 
@@ -561,11 +562,12 @@ class NMRFastAna:
         plt.close()
 
         # qcurve adjustment
-        plt.figure(3)
-        plt.plot(self.data.freq, self.data.amp, '.', color = 'red')
-        plt.plot(self.ref.freq + self.xOffset, self.scale*(self.ref.amp + self.yOffset), '.', color = 'blue')
-        plt.savefig(saveprefix + '_qadj.png')
-        plt.close()
+        if not self.qcurveless:
+            plt.figure(3)
+            plt.plot(self.data.freq, self.data.amp, '.', color = 'red')
+            plt.plot(self.ref.freq + self.xOffset, self.scale*(self.ref.amp + self.yOffset), '.', color = 'blue')
+            plt.savefig(saveprefix + '_qadj.png')
+            plt.close()
 
     def summary(self, filename):
         """Print the summary of the existing data at shutdown"""
