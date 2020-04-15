@@ -11,44 +11,68 @@ from scipy.optimize import curve_fit
 from iminuit import Minuit
 from datetime import datetime
 from optparse import OptionParser
+import logging
 
-def timestamp():
-    """Create a timestamp for loggin purpose"""
-    return datetime.now().strftime('%y%m%d-%H%M')
+class logger:
+    """Configure a simple logger for both console and file output"""
+    log_console = logging.getLogger('console')
+    log_fileout = logging.getLogger('fileout')
+    enableFileout = False
 
-def parseSweepFile(filename, full = False):
-    """parse an entire input file. if it's not an AVE file produced by LabView, read the entire file and make average"""
-    assert os.path.exists(filename) or os.path.exists(filename.replace('AVE', '')), 'File %s does not exist.' % filename
-    if 'AVE' in filename and os.path.exists(filename):
-        return SweepData('\n'.join([line.strip() for line in open(filename)]))
-    else: # if AVE file does not exist, try the original one and calculate the average myself ...
-        filename = filename.replace('AVE', '')
-        contents = [line.strip() for line in open(filename)]
+    @staticmethod
+    def init(options):
+        log_format = '%(asctime)s - %(levelname)s: %(message)s'
+        log_handler_console = logging.StreamHandler()
+        log_handler_console.setFormatter(logging.Formatter(log_format))
+        logger.log_console.setLevel(options.loglevel.upper())
+        logger.log_console.addHandler(log_handler_console)
 
-        index = 0
-        rsweeps = []
-        while index < len(contents):
-            nSteps = int(float(contents[index + 14]))
-            rsweeps.append(contents[index:index + 35 + nSteps])
-            index = index + 35 + nSteps
+        logging.enableFileout = False
+        if options.logfile != '':
+            log_handler_fileout = logging.FileHandler(options.logfile)
+            log_handler_fileout.setFormatter(logging.Formatter(log_format))     
+            logger.log_fileout.setLevel(options.loglevel)
+            logger.log_fileout.addHandler(log_handler_fileout)
 
-        if full:
-            return [SweepData('\n'.join(rs)) for rs in rsweeps]
+            logger.enableFileout = True
 
-        sweep = SweepData('\n'.join(rsweeps[0]))
-        for rs in rsweeps[1:]:
-            sweep.amp = sweep.amp + SweepData('\n'.join(rs)).amp
-        sweep.amp = sweep.amp/len(rsweeps)
+    @staticmethod
+    def debug(msg):
+        logger.printlog('debug', msg)
+    
+    @staticmethod
+    def info(msg):
+        logger.printlog('info', msg)
 
-        return sweep
+    @staticmethod
+    def warning(msg):
+        logger.printlog('warning', msg)
+    
+    @staticmethod
+    def error(msg):
+        logger.printlog('error', msg)
+
+    @staticmethod
+    def critical(msg):
+        """Critical is used for exception handling, a bit more infomation is added"""
+        _, exc_obj, tb = sys.exc_info()
+        lineno = tb.tb_lineno
+        logger.printlog('critical', '%s - line %d - %s' % (msg, lineno, str(exc_obj)))
+
+    @staticmethod
+    def printlog(level, msg):
+        getattr(logger.log_console, level)(msg)
+        if logger.enableFileout:
+            getattr(logger.log_fileout, level)(msg)
 
 class SweepData:
     """Container of sweep data"""
     #gain_value = [1., 20., 200.]
     gain_value = [1., 1., 1.]
 
-    def __init__(self, inputStr = '', qfile = '', ts = 0, center = 213., freqMin = 212.6, freqMax = 213.4, nSteps = 500, gain = 1, amps = []):
+    def __init__(self, inputStr = '', qfile = '', ts = 0, center = 213., freqMin = 212.6, freqMax = 213.4, nSteps = 500, gain = 1, polarity = 1., amps = []):
         """parse the input string and fill the header+data info"""
+        self.polarity = polarity
         if inputStr == '':  # if nothing is provided, put together a fake header
             fakeHeader = ['9999.9999' for i in range(35)]
             fakeHeader[0] = 'Data from UVa q-meter'
@@ -97,11 +121,16 @@ class SweepData:
         self.minFreq = self.centerFreq - (self.nSteps - 1.)/2.*self.stepSize
         self.maxFreq = self.centerFreq + (self.nSteps - 1.)/2.*self.stepSize
 
+        # range of valid data, default to be the entire data range
+        self.validL = self.minFreq
+        self.validH = self.maxFreq
+
         # x and y data
         self.freq = np.linspace(self.minFreq, self.maxFreq, num = self.nSteps, endpoint = True)
         self.amp  = np.array([float(line)/SweepData.gain_value[self.gain] for line in info[35:]])
 
-        self.peakIdx = np.argmax(self.amp)
+        # these are just place holders for future use
+        self.peakIdx = self.getPeakIdx()
         self.peakX = self.freq[self.peakIdx]
         self.peakY = self.amp[self.peakIdx]*SweepData.gain_value[self.gain]
         self.HML   = self.peakX - 0.06   # if we consider the 0.2MHz is 3sigma
@@ -118,12 +147,15 @@ class SweepData:
         # integral of the curve
         self.integral = 0.
 
+        # number of average events
+        self.evtCounts = 1
+
         # flag of bkg-subtraction status, 0 for fail, 1 for success
         self.status = 0
 
     def update(self, avgwin = 3):
         """update the peak info using the most recent data"""
-        self.peakIdx = np.argmax(self.amp)
+        self.peakIdx = self.getPeakIdx()
         peakSlice = np.arange(self.peakIdx-avgwin, self.peakIdx+avgwin+1, 1)
 
         self.peakX = (self.freq[peakSlice]*self.amp[peakSlice]).sum()/self.amp[peakSlice].sum()
@@ -131,6 +163,19 @@ class SweepData:
 
         uspline = interpolate.UnivariateSpline(self.freq, self.amp - 0.5*self.peakY, s = 0)
         self.HML, self.HMR = uspline.roots()[:2]
+    
+    def getPeakIdx(self):
+        return self.getPeakFunc()(self.amp)
+        
+    def getPeakFunc(self):
+        if self.polarity > 0.:
+            return np.argmax
+        else:
+            return np.argmin
+    
+    def getArea(self, fmin, fmax):
+        signalSlice = [i for i in range(self.freq.size) if self.freq[i] > fmin and self.freq[i] < fmax]
+        return self.amp[signalSlice].sum()*self.stepSize
 
     def shortString(self):
         """return the data plus a short header: 1. number of points; 2. starting frequency; 3. frequency step; 4. the integral of the curve"""
@@ -152,6 +197,47 @@ class SweepData:
     def interpolate(self):
         """create spline interpolation for future use"""
         self.func = interpolate.splrep(self.freq, self.amp, s = 0)
+    
+    @staticmethod
+    def parseSweepFile(filename, average = 9999):
+        """parse an entire input file. if it's not an AVE file produced by LabView, read the entire file and make average"""
+        assert os.path.exists(filename) or os.path.exists(filename.replace('AVE', '')), 'File %s does not exist.' % filename
+        assert average > 0, 'Average window cannot be smaller than 1, %d was provided.' % average
+
+        if 'AVE' in filename and os.path.exists(filename):
+            return SweepData('\n'.join([line.strip() for line in open(filename)]))
+        else: # if AVE file does not exist, try the original one and calculate the average myself ...
+            filename = filename.replace('AVE', '')
+            contents = [line.strip() for line in open(filename)]
+
+            index = 0
+            rawSweeps = []
+            while index < len(contents):
+                nSteps = int(float(contents[index + 14]))
+                rawSweeps.append(SweepData('\n'.join(contents[index:index + 35 + nSteps])))
+                index = index + 35 + nSteps
+            
+            sweeps = []
+            for i, s in enumerate(rawSweeps[1:]):
+                if (i % average) == 0:
+                    sweep = copy.deepcopy(s)
+                    nAvg = 1.
+                    continue
+                
+                sweep.amp = sweep.amp + s.amp
+                sweep.timeH = sweep.timeH + s.timeH
+                sweep.timeL = sweep.timeL + s.timeL
+                nAvg = nAvg + 1.
+                
+                if (i % average) == (average-1) or i == len(rawSweeps)-2:
+                    sweep.amp = sweep.amp/nAvg
+                    sweep.timeH = int(sweep.timeH/nAvg)
+                    sweep.timeL = int(sweep.timeL/nAvg)
+                    sweep.evtCounts = int(nAvg + 0.5)
+                    sweeps.append(sweep)
+                    continue
+
+            return sweeps
 
 class TEPolCalculator:
     def __init__(self):
@@ -213,11 +299,13 @@ class NMRFastAna:
     def __init__(self, options = None):
         self.freqCenter = 213.
         self.freqWin = 0.25
-        self.freqMin = 212.65
+        self.freqMin = 212.65  # real frequency range of the input data
         self.freqMax = 213.35
-        self.freqAdjMin = self.freqMin
+        self.freqValidMin = self.freqMin  # valid range of the input data
+        self.freqValidMax = self.freqMax 
+        self.freqAdjMin = self.freqMin  # the range used the background subtraction after optional q-curve shift
         self.freqAdjMax = self.freqMax
-        self.sampleSize = 0.002
+        self.sampleRate = 1
 
         self.xOffsetMin = -0.5
         self.xOffsetMax = 0.5
@@ -233,14 +321,14 @@ class NMRFastAna:
         self.ref = None
 
         # file name and path of the QCV file
-        self.refFile = ''
-        self.refPath = ''
-        self.refDefaultFile = ''
+        self.refFile = ''   # in principle each SweepData header should contain the QCV file to use
+        self.refPath = ''   
+        self.refDefaultFile = ''  # if refFile is not provided or available, use the default instead
         if options is not None:
             self.refPath = options.qcvpath
             self.refDefaultFile = options.qcvfile
 
-        # q curve subtracted data
+        # q curve subtracted data, X and Y and function
         self.subtractedX = None
         self.subtractedY = None
         self.subtractedF = None
@@ -250,6 +338,7 @@ class NMRFastAna:
         self.sideBandY = None
         self.sidebandF = None   # spline function for sideband
         self.sidebandP = None   # polymonial function for sideband
+        self.sidebandC = None   # Chebyshev function for sideband
 
         # bkg-subtraction mode
         self.mode = 'spline'
@@ -279,7 +368,6 @@ class NMRFastAna:
         avgSweep.amp = avgSweep.amp/(len(self.results) - id_start)
         return avgSweep
 
-
     def setQcurve(self, qfile):
         """read the Q curve file, if input file set to auto, it will read the q curve file specified in data header instead. return True if succeeded"""
         if qfile == 'auto':
@@ -295,13 +383,27 @@ class NMRFastAna:
             return
 
         # check if either AVE file or original file exists
+        qfileAve = qfile.replace('AVE', '')
         qfileAbs = os.path.join(self.refPath, qfile)
-        assert (os.path.exists(qfileAbs) or os.path.exists(qfileAbs.replace('AVE', ''))), 'Q curve input file %s does not exist.' % qfileAbs
+        qfileAbsAve = qfileAbs.replace('AVE', '')
+        qfileAbsDefault = os.path.join(self.refPath, self.refDefaultFile)
+        assert (os.path.exists(qfileAbs) or os.path.exists(qfileAbsAve) or os.path.exists(qfileAbsDefault)), 'Q curve input file %s (or %s) does not exist.' % (qfileAbs, qfileAbsDefault)
 
-        if self.refFile != qfile:
-            self.refFile = qfile
-            self.ref = parseSweepFile(qfileAbs)
-            self.ref.interpolate()
+        if os.path.exists(qfileAbs):
+            if self.refFile != qfile:
+                self.refFile = qfile
+                self.ref = SweepData.parseSweepFile(qfileAbs)[0]
+                self.ref.interpolate()
+        elif os.path.exists(qfileAbsAve):
+            if self.refFile != qfileAve:
+                self.refFile = qfileAve
+                self.ref = SweepData.parseSweepFile(qfileAbsAve)[0]
+                self.ref.interpolate()
+        elif os.path.exists(qfileAbsDefault):
+            if self.refFile != self.refDefaultFile:
+                self.refFile = self.refDefaultFile
+                self.ref = SweepData.parseSweepFile(qfileAbsDefault)[0]
+                self.ref.interpolate()
 
     def setData(self, dataIn):
         """set the data input"""
@@ -316,29 +418,28 @@ class NMRFastAna:
 
         self.freqMin = self.data.freq[0]
         self.freqMax = self.data.freq[-1]
+        self.freqValidMin = self.data.validL
+        self.freqValidMax = self.data.validH
 
         # check if it's from a new run
         if len(self.results) > 0 and self.data.sweepID < self.results[-1].sweepID:
-            self.results = []
+            self.clearCache()
+
+    def clearCache(self):
+        self.results = []
 
     def range(self):
         """adjust the range according to the current offset parameter"""
         # find the real minimum and maximum given the offset
-        tempmin = self.data.freq[0] + self.xOffset
-        tempmax = self.data.freq[-1]
-        if self.xOffset < 0:
-            tempmin = self.data.freq[0]
-            tempmax = self.data.freq[-1] + self.xOffset
-        return (max(tempmin, self.freqMin), min(tempmax, self.freqMax))
+        return (max(self.freqValidMin+self.xOffset, self.freqValidMin), min(self.freqValidMax+self.xOffset, self.freqValidMax))
 
     def chisq(self, x, y):
         """definition of the chi^2 function for Q curve adjustment"""
         self.xOffset = x
         self.yOffset = y
         self.freqAdjMin, self.freqAdjMax = self.range()
-        nSamples = int((self.freqAdjMax - self.freqAdjMin)/self.sampleSize)
 
-        freq = np.array([f for f in np.linspace(self.freqAdjMin, self.freqAdjMax, num = nSamples, endpoint = False) if abs(f - self.freqCenter) > self.freqWin])
+        freq = np.array([f for f in self.ref.freq[range(0, self.ref.freq.size, self.sampleRate)] if abs(f - self.freqCenter) > self.freqWin and f > self.freqAdjMin and f < self.freqAdjMax])
         chi2 = ((interpolate.splev(freq, self.data.func, der = 0) - (interpolate.splev(freq - x, self.ref.func, der = 0) + y))**2).sum()/freq.size
 
         return chi2
@@ -360,36 +461,6 @@ class NMRFastAna:
             self.xOffset = 0.
             self.yOffset = 0.
 
-    def gaus(self, x, A, m, s):
-        return A*np.exp(-(x - m)**2/(2.*s**2))
-
-    def pol1(self, x, p0, p1):
-        return p0 + p1*x
-
-    def pol2(self, x, p0, p1, p2):
-        return p0 + p1*x + p2*x*x
-
-    def pol3(self, x, p0, p1, p2, p3):
-        return p0 + p1*x + p2*x*x + p3*x*x*x
-
-    def gausfit(self, xdata, ydata):
-        pfit, perr = curve_fit(self.gaus, xdata, ydata, p0 = [ydata.max(), self.freqCenter, self.freqWin])
-        return pfit[1], pfit[2]
-
-    def polfit(self, xdata, ydata):
-        chi2 = [999. for i in range(3)]
-        pfit1, _ = curve_fit(self.pol1, xdata, ydata, p0 = [0., 0.])
-        chi2[0] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit1))**2).sum()#/(xdata.size - 2)
-
-        pfit2, _ = curve_fit(self.pol2, xdata, ydata, p0 = [0., 0., 0.])
-        chi2[1] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit2))**2).sum()#/(xdata.size - 3)
-
-        pfit3, _ = curve_fit(self.pol3, xdata, ydata, p0 = [0., 0., 0., 0.])
-        chi2[2] = ((ydata - np.polynomial.polynomial.polyval(xdata, pfit3))**2).sum()#/(xdata.size - 4)
-
-        index = chi2.index(min(chi2))
-        return [pfit1, pfit2, pfit3][index], min(chi2)
-
     def smoothArray(self, xx):
         """Implementation of HBOOK 353QH algorithm, ref: Proc.of the 1974 CERN School of Computing, Norway, 11-24 August, 1974. page 293"""
         # only applicable to size > 3 array
@@ -402,7 +473,7 @@ class NMRFastAna:
         zz = xx.copy()
         rr = np.zeros(xx.size)
 
-        # 353QH twicing
+        # 353QH twice
         for i in range(2):
             # 3, 5, 3 running medians
             for j in range(3):
@@ -462,6 +533,34 @@ class NMRFastAna:
 
         xx[:] = zz + rr
 
+    def fitSideband(self, mode = None):
+        if mode == None:
+            mode = self.mode
+
+        if mode == 'spline':
+            self.sidebandF = interpolate.splrep(self.sidebandX, self.sidebandY, s = 1, k = 3)
+        elif mode == 'poly3':
+            self.sidebandP = np.poly1d(np.polyfit(self.sidebandX, self.sidebandY, 3))
+        elif mode == 'cheby3':
+            self.sidebandC = np.polynomial.Chebyshev.fit(self.sidebandX, self.sidebandY, 3)
+    
+    def bkgY(self, bkgX, mode = None):
+        if mode == None:
+            mode = self.mode
+
+        if mode == 'spline':
+            return interpolate.splev(bkgX, self.sidebandF, der = 0)
+        elif mode == 'poly3':
+            return self.sidebandP(bkgX)
+        elif mode == 'cheby3':
+            return self.sidebandC(bkgX)
+    
+    def bkgChi2(self, mode = None):
+        if mode == None:
+            mode = self.mode
+        
+        return ((self.sidebandY - self.bkgY(self.sidebandX, mode=mode))**2).sum()/self.sidebandX.size
+       
     def qCurveSubtract(self):
         """with the adjusted Q curve info, make the Q curve subtraction and then the sideband spline subtraction"""
         self.freqAdjMin, self.freqAdjMax = self.range()
@@ -476,12 +575,9 @@ class NMRFastAna:
         #self.subtractedF = interpolate.splrep(self.subtractedX, self.subtractedY, s = 0)
 
         # smooth the left and right sideband
-        sampleRate = int(self.sampleSize/self.data.stepSize)
-        if sampleRate < 1:
-            sampleRate = 1
         adjustedCenter = self.freqCenter  #self.subtractedX[np.argmax(self.subtractedY)]
-        RsidebandSliceL  = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if adjustedCenter - self.subtractedX[i] > self.freqWin])
-        RsidebandSliceR  = np.array([i for i in range(0, self.subtractedX.size, sampleRate) if self.subtractedX[i] - adjustedCenter > self.freqWin])
+        RsidebandSliceL = np.array([i for i in range(0, self.subtractedX.size, self.sampleRate) if adjustedCenter - self.subtractedX[i] > self.freqWin])
+        RsidebandSliceR = np.array([i for i in range(0, self.subtractedX.size, self.sampleRate) if self.subtractedX[i] - adjustedCenter > self.freqWin])
 
         #sidebandMeanL = self.subtractedY[RsidebandSliceL].mean()
         #sidebandSigmaL = self.subtractedY[RsidebandSliceL].std()
@@ -500,31 +596,27 @@ class NMRFastAna:
 
         # subtract either interpolated/fitted sideband from Q-curve-subtracted data
         self.signal = copy.deepcopy(self.data)
-        if self.mode == 'spline':
-            self.sidebandF = interpolate.splrep(self.sidebandX, self.sidebandY, s = 1, k = 3)
-            centerY = self.subtractedY - interpolate.splev(self.subtractedX, self.sidebandF, der = 0)
-        else:
-            self.sidebandP, _ = self.polfit(self.sidebandX, self.sidebandY)
-            centerY = self.subtractedY - np.polynomial.polynomial.polyval(self.subtractedX, self.sidebandP)
+        self.fitSideband()
+        signalY = self.subtractedY - self.bkgY(self.subtractedX)
 
         # add zeros on left/right if necessary to the data to match the input data length
         paddingL = np.array([f for f in self.data.freq if f < self.subtractedX.min()])
         paddingH = np.array([f for f in self.data.freq if f > self.subtractedX.max()])
         self.signal.freq = np.concatenate((paddingL, self.subtractedX, paddingH))
-        self.signal.amp = np.concatenate((np.full(paddingL.size, 0.), centerY, np.full(paddingH.size, 0.)))
+        self.signal.amp  = np.concatenate((np.full(paddingL.size, 0.), signalY, np.full(paddingH.size, 0.)))
         self.signal.update()
 
         # only integrate the curve inside the signal window
-        signalSlice = np.array([i for i in range(self.subtractedX.size) if abs(self.subtractedX[i] - adjustedCenter) < self.freqWin])
-        self.signal.integral = self.signal.amp[signalSlice].sum()*self.signal.stepSize
+        self.signal.integral = self.signal.getArea(adjustedCenter - self.freqWin, adjustedCenter + self.freqWin)
 
         # check the status of the bkg-subtraction
-        sidebandSlopeL = (self.subtractedY[RsidebandSliceL[-1]] - self.subtractedY[RsidebandSliceL[0]])/(self.subtractedX[RsidebandSliceL[-1]] - self.subtractedX[RsidebandSliceL[0]])
-        sidebandSlopeR = (self.subtractedY[RsidebandSliceR[-1]] - self.subtractedY[RsidebandSliceR[0]])/(self.subtractedX[RsidebandSliceR[-1]] - self.subtractedX[RsidebandSliceR[0]])
-        if abs(sidebandSlopeL - sidebandSlopeR)/(abs(sidebandSlopeL) + abs(sidebandSlopeR)) < 1.:
-            self.signal.status = 2
-        else:
-            self.signal.status = 1
+        self.signal.status = 0
+        # sidebandSlopeL = (self.subtractedY[RsidebandSliceL[-1]] - self.subtractedY[RsidebandSliceL[0]])/(self.subtractedX[RsidebandSliceL[-1]] - self.subtractedX[RsidebandSliceL[0]])
+        # sidebandSlopeR = (self.subtractedY[RsidebandSliceR[-1]] - self.subtractedY[RsidebandSliceR[0]])/(self.subtractedX[RsidebandSliceR[-1]] - self.subtractedX[RsidebandSliceR[0]])
+        # if abs(sidebandSlopeL - sidebandSlopeR)/(abs(sidebandSlopeL) + abs(sidebandSlopeR)) < 1.:
+        #     self.signal.status = 2
+        # else:
+        #     self.signal.status = 1
 
         self.results.append(self.signal)
 
@@ -582,14 +674,6 @@ class NMRFastAna:
             fout.write('%d,%d,%d,%.4e,%.4f,%.4e,%.4e,%.4e,%.4e,%d\n' % (res.sweepID, res.timeH, res.timeL, res.integral, res.temp, res.peakX, res.peakY, res.HML, res.HMR, res.status))
         fout.close()
 
-def exceptionLogging(exc_type):
-    """print the exception info with details"""
-
-    _, exc_obj, tb = sys.exc_info()
-    lineno = tb.tb_lineno
-
-    print timestamp(), exc_type + ':', 'line %d' % lineno, exc_obj
-
 def recvall(conn, timeout):
     conn.setblocking(0)
 
@@ -611,7 +695,6 @@ def recvall(conn, timeout):
         except:
             pass
 
-    #print len(dataIn), time.time() - beginT
     return dataIn.replace('?', '')
 
 def main(options):
@@ -623,15 +706,15 @@ def main(options):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind((options.host, options.port))
     except:
-        print timestamp(), 'ERROR: port %d is being used. Exit now.' % options.port
+        logger.error('port %d is being used. Exit now.' % options.port)
         sys.exit(0)
     sock.listen(5)
 
     # Wait for the client to connect
-    print timestamp(), 'INFO: server started, waiting for incoming data ...'
+    logger.info('server started, waiting for incoming data ...')
     while True:
         conn, client_address = sock.accept()
-        print timestamp(), 'INFO: connected from', client_address[0]
+        logger.info('connected from', client_address[0])
 
         # wait for incoming data indefinitely
         idleCycle = 0
@@ -639,21 +722,21 @@ def main(options):
             dataIn = recvall(conn, 1.)
 
             if 'shutdown' in dataIn.lower():
-                print timestamp(), 'INFO: received shutdown command, closing ...'
+                logger.info('received shutdown command, closing ...')
                 fastAna.summary('test.csv')
                 sys.exit(0)
 
             if dataIn == '':
                 idleCycle = idleCycle + 1
                 if idleCycle > 10:  # disconnect if not received data for a long time
-                    print timestamp(), 'WARNING: connection lost, waiting for another ...'
+                    logger.warning('connection lost, waiting for another ...')
                     conn.shutdown(socket.SHUT_RDWR)
                     conn.close()
                     break
                 continue
 
             if 'testtesttest' in dataIn.lower():
-                print timestamp(), 'INFO: received test command, reply OK.'
+                logging.info('received test command, reply OK.')
                 conn.sendall('ok?')
                 continue
 
@@ -665,7 +748,7 @@ def main(options):
                 fastAna.setData(data)
                 fastAna.setQcurve('auto')
             except:
-                exceptionLogging('I/O ERROR')
+                logger.critical('I/O ERROR')
 
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
@@ -675,7 +758,7 @@ def main(options):
                 #fastAna.qCurveAdjust()
                 fastAna.qCurveSubtract()
             except:
-                exceptionLogging('Analysis ERROR')
+                logger.critical('Analysis ERROR')
 
                 header, res = data.shortString()
                 conn.sendall(header + res + '\n?')
@@ -685,18 +768,20 @@ def main(options):
             conn.sendall(header + res + '\n?')
 
             finish_time = time.time()
-            print timestamp(), 'INFO: finished one NMR analysis using %.2f ms' % ((finish_time - start_time)*1000)
+            logger.info('finished one NMR analysis using %.2f ms' % ((finish_time - start_time)*1000))
 
 if __name__ == '__main__':
     # parse the command line input
     parser = OptionParser('Usage: %prog [options]')
     parser.add_option('--host', type = 'string', dest = 'host', help = 'host ip address', default = 'localhost')
     parser.add_option('--port', type = 'int', dest = 'port', help = 'port number', default = 10000)
-    parser.add_option('--log', type = 'string', dest = 'log', help = 'log file', default = '')
+    parser.add_option('--log', type = 'string', dest = 'logfile', help = 'log file path', default = '')
+    parser.add_option('--loglevel', type = 'string', dest = 'loglevel', help = 'log output level', default = 'info')
     parser.add_option('--mode', type = 'string', dest = 'mode', help = 'bkg subtraction method', default = 'spline')
     parser.add_option('--qcvless', action = 'store_true', dest = 'qcvless', help = 'Enable the qcurve less mode', default = False)
     parser.add_option('--qcvpath', type = 'string', dest = 'qcvpath', help = 'path where qcv file is stored', default = './')
     parser.add_option('--qcvfile', type = 'string', dest = 'qcvfile', help = 'default qcurve file', default = 'QCV3563809315.csv')
     (options, args) = parser.parse_args()
 
+    logger.init(options)
     main(options)
