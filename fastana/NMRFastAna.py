@@ -6,6 +6,7 @@ import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import select
+import csv
 from scipy import interpolate
 from scipy.optimize import curve_fit
 from iminuit import Minuit
@@ -70,56 +71,14 @@ class SweepData:
     #gain_value = [1., 20., 200.]
     gain_value = [1., 1., 1.]
 
-    def __init__(self, inputStr = '', qfile = '', ts = 0, center = 213., freqMin = 212.6, freqMax = 213.4, nSteps = 500, gain = 1, polarity = 1., amps = []):
+    def __init__(self, inputStr = '', polarity = 1., amp = None, header = None):
         """parse the input string and fill the header+data info"""
-        self.polarity = polarity
-        if inputStr == '':  # if nothing is provided, put together a fake header
-            fakeHeader = ['9999.9999' for i in range(35)]
-            fakeHeader[0] = 'Data from UVa q-meter'
-            fakeHeader[1] = qfile
-            fakeHeader[3] = 'teq.csv'
-            fakeHeader[12] = '%f' % ((freqMin + freqMax)/2.)
-            fakeHeader[13] = '%f' % ((freqMax - freqMin)/nSteps)
-            fakeHeader[14] = '%f' % (nSteps + 1)   # Attention: compensate for the last point
-            fakeHeader[24] = '%f' % gain
-            fakeHeader[27] = '0.0000'
-            fakeHeader[16] = '22.0000'
-            fakeHeader[15] = '%.4f' % ts
-            fakeHeader[33] = '1.0000'
-            fakeHeader[34] = '1.0000'
-            fakeHeader[10] = '%s.0000' % str(long(ts) + long(2082844800))[:5]
-            fakeHeader[11] = '%s.0000' % str(long(ts) + long(2082844800))[5:]
 
-            inputStr = '\n'.join(fakeHeader+amps+[amps[-1]])  # Attention, compensate for the last point
-
-        info = inputStr.strip().split('\n')
-        assert len(info) > 36, 'input string too short'
-
-        # direct data
-        self.header     = info[:35]
-        self.QCurveFile = info[1].strip()
-        self.TEFile     = info[3].strip()
-        self.centerFreq = float(info[12])
-        self.stepSize   = float(info[13])
-        self.nSteps     = int(float(info[14]))
-        self.gain       = int(float(info[24]))
-        self.logScale   = int(float(info[27])) == 1
-        self.temp       = float(info[16])
-        self.sweepID    = int(float(info[15]))
-        self.HeTemp     = float(info[33])
-        self.HePress    = float(info[34])
-        self.timeH      = int(float(info[10]))
-        self.timeL      = int(float(info[11]))
-        try:
-            self.signalL    = float(info[8])
-            self.signalH    = float(info[9])
-        except:
-            self.signalL    = 212.75
-            self.signalH    = 213.25
-
-        # indirect ones
-        self.minFreq = self.centerFreq - (self.nSteps - 1.)/2.*self.stepSize
-        self.maxFreq = self.centerFreq + (self.nSteps - 1.)/2.*self.stepSize
+        # call different parser based on the input
+        if amp is None or header is None:
+            self.parseLANLData(inputStr, polarity)
+        else:
+            self.parseQmeterData(amp, header, polarity)
 
         # range of valid data, default to be the entire data range
         self.validL = self.minFreq
@@ -127,7 +86,6 @@ class SweepData:
 
         # x and y data
         self.freq = np.linspace(self.minFreq, self.maxFreq, num = self.nSteps, endpoint = True)
-        self.amp  = np.array([float(line)/SweepData.gain_value[self.gain] for line in info[35:]])
 
         # these are just place holders for future use
         self.peakIdx = self.getPeakIdx()
@@ -152,6 +110,70 @@ class SweepData:
 
         # flag of bkg-subtraction status, 0 for fail, 1 for success
         self.status = 0
+
+    def parseLANLData(self, inputStr, polarity = 1.):
+        """Parse the list of data as a long string separated by \n from LANL NMR system"""
+        self.polarity = polarity
+        info = inputStr.strip().split('\n')
+        assert len(info) > 36, 'input string too short'
+
+        # direct data
+        self.header     = info[:35]
+        self.QCurveFile = info[1].strip()
+        self.TEFile     = info[3].strip()
+        self.centerFreq = float(info[12])
+        self.stepSize   = float(info[13])
+        self.nSteps     = int(float(info[14]))
+        self.gain       = int(float(info[24]))
+        self.logScale   = int(float(info[27])) == 1
+        self.temp       = float(info[16])
+        self.sweepID    = int(float(info[15]))
+        self.HeTemp     = float(info[33])
+        self.HePress    = float(info[34])
+        self.timeH      = int(float(info[10]))
+        self.timeL      = int(float(info[11]))
+        self.amp        = np.array([float(line)/SweepData.gain_value[self.gain] for line in info[35:]])
+
+        try:
+            self.signalL    = float(info[8])
+            self.signalH    = float(info[9])
+        except:
+            self.signalL    = 212.75
+            self.signalH    = 213.25
+
+        # indirect ones
+        self.minFreq = self.centerFreq - (self.nSteps - 1.)/2.*self.stepSize
+        self.maxFreq = self.centerFreq + (self.nSteps - 1.)/2.*self.stepSize
+
+    def parseQmeterData(self, amp, header, polarity = -1.):
+        """Convert the header info and amplitude info from the Q-meter record to the SweepData class"""
+        self.polarity = polarity
+        self.header = header
+        self.QCurveFile = header['Baseline']
+        self.TEFile = None
+        self.centerFreq = float(header['RFFreq'])
+        self.nSteps = int(header['ScanSteps'])
+        self.stepSize = float(header['RFMod'])/1000000.*2./self.nSteps
+        self.gain = int(header['YaleGain'])
+        self.logScale = False
+        self.temp = 20.
+        self.sweepID = int(long(header['EventNum']) % 100000)
+        self.HeTemp = 0.
+        self.HePress = 0.
+        
+        assert amp[0] == header['EventNum'], 'Event number mismatch'
+        assert len(amp) == self.nSteps + 1, 'Number of points mismatch'
+        self.amp = np.array([float(a) for a in amp[1:]], dtype=float)
+        
+        ts = long(header['EventNum']) + long(2082844800)
+        self.timeH = int(str(ts)[:5])
+        self.timeL = int(str(ts)[5:])
+
+        self.signalL = 212.75
+        self.signalH = 213.25
+
+        self.minFreq = self.centerFreq - self.nSteps/2.*self.stepSize
+        self.maxFreq = self.centerFreq + self.nSteps/2.*self.stepSize
 
     def update(self, avgwin = 3):
         """update the peak info using the most recent data"""
@@ -199,7 +221,7 @@ class SweepData:
         self.func = interpolate.splrep(self.freq, self.amp, s = 0)
     
     @staticmethod
-    def parseSweepFile(filename, average = 9999):
+    def parseSweepFile(filename, headerfile = None, average = 9999):
         """parse an entire input file. if it's not an AVE file produced by LabView, read the entire file and make average"""
         assert os.path.exists(filename) or os.path.exists(filename.replace('AVE', '')), 'File %s does not exist.' % filename
         assert average > 0, 'Average window cannot be smaller than 1, %d was provided.' % average
@@ -207,16 +229,27 @@ class SweepData:
         if 'AVE' in filename and os.path.exists(filename):
             return SweepData('\n'.join([line.strip() for line in open(filename)]))
         else: # if AVE file does not exist, try the original one and calculate the average myself ...
-            filename = filename.replace('AVE', '')
-            contents = [line.strip() for line in open(filename)]
-
-            index = 0
             rawSweeps = []
-            while index < len(contents):
-                nSteps = int(float(contents[index + 14]))
-                rawSweeps.append(SweepData('\n'.join(contents[index:index + 35 + nSteps])))
-                index = index + 35 + nSteps
-            
+            if headerfile is None:  # this is LANL data
+                filename = filename.replace('AVE', '')
+                contents = [line.strip() for line in open(filename)]
+
+                index = 0
+                while index < len(contents):
+                    nSteps = int(float(contents[index + 14]))
+                    rawSweeps.append(SweepData('\n'.join(contents[index:index + 35 + nSteps])))
+                    index = index + 35 + nSteps
+            else:  # with a headerfile we assume it's UVA data
+                data = [[l.strip() for l in line.strip().split(',')] for line in open(filename)]
+                header = [h for h in csv.DictReader(open(headerfile))]
+
+                assert len(data) == len(header), 'data and header sizes do not match'
+                for d, h in zip(data, header):
+                    rawSweeps.append(SweepData(amp=d, header=h, polarity=-1.))
+
+            if average == 1:
+                return rawSweeps[1:]
+
             sweeps = []
             for i, s in enumerate(rawSweeps[1:]):
                 if (i % average) == 0:
