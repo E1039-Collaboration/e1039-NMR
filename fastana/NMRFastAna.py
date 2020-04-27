@@ -153,7 +153,7 @@ class SweepData:
         self.TEFile = None
         self.centerFreq = float(header['RFFreq'])
         self.nSteps = int(header['ScanSteps'])
-        self.stepSize = float(header['RFMod'])/1000000.*2./self.nSteps
+        self.stepSize = float(header['RFMod'])/1000.*2./self.nSteps
         self.gain = int(header['YaleGain'])
         self.logScale = False
         self.temp = 20.
@@ -237,7 +237,7 @@ class SweepData:
                 index = 0
                 while index < len(contents):
                     nSteps = int(float(contents[index + 14]))
-                    rawSweeps.append(SweepData('\n'.join(contents[index:index + 35 + nSteps])))
+                    rawSweeps.append(SweepData(inputStr='\n'.join(contents[index:index + 35 + nSteps])))
                     index = index + 35 + nSteps
             else:  # with a headerfile we assume it's UVA data
                 data = [[l.strip() for l in line.strip().split(',')] for line in open(filename)]
@@ -401,8 +401,14 @@ class NMRFastAna:
         avgSweep.amp = avgSweep.amp/(len(self.results) - id_start)
         return avgSweep
 
-    def setQcurve(self, qfile):
+    def setQcurve(self, qfile = 'auto', qdata = None):
         """read the Q curve file, if input file set to auto, it will read the q curve file specified in data header instead. return True if succeeded"""
+        if qdata is not None:
+            self.refFile = ''
+            self.ref = qdata
+            if self.ref.func is None:
+                self.ref.interpolate()
+
         if qfile == 'auto':
             qfile = self.data.QCurveFile
 
