@@ -176,15 +176,18 @@ class SweepData:
         self.maxFreq = self.centerFreq + self.nSteps/2.*self.stepSize
 
     def update(self, avgwin = 3):
-        """update the peak info using the most recent data"""
+        """update the peak info using the most recent data, it's for auxilary information only"""
         self.peakIdx = self.getPeakIdx()
         peakSlice = np.arange(self.peakIdx-avgwin, self.peakIdx+avgwin+1, 1)
 
-        self.peakX = (self.freq[peakSlice]*self.amp[peakSlice]).sum()/self.amp[peakSlice].sum()
-        self.peakY = np.interp(self.peakX, self.freq, self.amp)*SweepData.gain_value[self.gain]
+        try:
+            self.peakX = (self.freq[peakSlice]*self.amp[peakSlice]).sum()/self.amp[peakSlice].sum()
+            self.peakY = np.interp(self.peakX, self.freq, self.amp)*SweepData.gain_value[self.gain]
 
-        uspline = interpolate.UnivariateSpline(self.freq, self.amp - 0.5*self.peakY, s = 0)
-        self.HML, self.HMR = uspline.roots()[:2]
+            uspline = interpolate.UnivariateSpline(self.freq, self.amp - 0.5*self.peakY, s = 0)
+            self.HML, self.HMR = uspline.roots()[:2]
+        except:
+            pass
     
     def getPeakIdx(self):
         return self.getPeakFunc()(self.amp)
@@ -408,6 +411,7 @@ class NMRFastAna:
             self.ref = qdata
             if self.ref.func is None:
                 self.ref.interpolate()
+            return
 
         if qfile == 'auto':
             qfile = self.data.QCurveFile
