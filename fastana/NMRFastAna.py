@@ -130,8 +130,8 @@ class SweepData:
         self.sweepID    = int(float(info[15]))
         self.HeTemp     = float(info[33])
         self.HePress    = float(info[34])
-        self.timeH      = int(float(info[10]))
-        self.timeL      = int(float(info[11]))
+        self.timeH      = int(round(float(info[10])))
+        self.timeL      = int(round(float(info[11])))
         self.amp        = np.array([float(line)/SweepData.gain_value[self.gain] for line in info[35:]])
 
         try:
@@ -157,7 +157,7 @@ class SweepData:
         self.gain = int(header['YaleGain'])
         self.logScale = False
         self.temp = 20.
-        self.sweepID = int(long(header['EventNum']) % 100000)
+        self.sweepID = int(header['EventNum']) % 100000
         self.HeTemp = 0.
         self.HePress = 0.
         
@@ -165,7 +165,7 @@ class SweepData:
         assert len(amp) == self.nSteps + 1, 'Number of points mismatch'
         self.amp = np.array([float(a) for a in amp[1:]], dtype=float)
         
-        ts = long(header['EventNum']) + long(2082844800)
+        ts = int(header['EventNum']) + 2082844800
         self.timeH = int(str(ts)[:5])
         self.timeL = int(str(ts)[5:])
 
@@ -174,6 +174,13 @@ class SweepData:
 
         self.minFreq = self.centerFreq - self.nSteps/2.*self.stepSize
         self.maxFreq = self.centerFreq + self.nSteps/2.*self.stepSize
+
+    def getTimeStamp(self, unix=False):
+        hfstime = self.timeH*100000 + self.timeL
+        if unix:
+            return hfstime - 2082844800
+        else:
+            return hfstime
 
     def update(self, avgwin = 3):
         """update the peak info using the most recent data, it's for auxilary information only"""
@@ -202,6 +209,16 @@ class SweepData:
         signalSlice = [i for i in range(self.freq.size) if self.freq[i] > fmin and self.freq[i] < fmax]
         return self.amp[signalSlice].sum()*self.stepSize
 
+    def getBkgQuality(self):
+        bkgSlice = [i for i in range(self.freq.size) if (self.freq[i] > self.validL and self.freq[i] < self.signalL) or (self.freq[i] > self.signalH and self.freq[i] < self.validH)]
+
+        bkgAmp = self.amp[bkgSlice]
+        bkgMean = bkgAmp.mean()
+        bkgStd  = bkgAmp.std()
+
+        # we could get more quality variables, like an expected bkg contribution fraction in self.integral might be interesting, but for now let's get mean and std only
+        return bkgMean/self.integral, bkgStd/self.integral
+
     def shortString(self):
         """return the data plus a short header: 1. number of points; 2. starting frequency; 3. frequency step; 4. the integral of the curve"""
         s = ''
@@ -224,7 +241,7 @@ class SweepData:
         self.func = interpolate.splrep(self.freq, self.amp, s = 0)
     
     @staticmethod
-    def parseSweepFile(filename, headerfile = None, average = 9999):
+    def parseSweepFile(filename, headerfile = None, average = 9999, ignoreFirstEntry = False):
         """parse an entire input file. if it's not an AVE file produced by LabView, read the entire file and make average"""
         assert os.path.exists(filename) or os.path.exists(filename.replace('AVE', '')), 'File %s does not exist.' % filename
         assert average > 0, 'Average window cannot be smaller than 1, %d was provided.' % average
@@ -249,26 +266,27 @@ class SweepData:
                 assert len(data) == len(header), 'data and header sizes do not match'
                 for d, h in zip(data, header):
                     rawSweeps.append(SweepData(amp=d, header=h, polarity=-1.))
+            
+            # TODO: this is just temporary and should be changed back
+            if ignoreFirstEntry:
+                rawSweeps = rawSweeps[1:]
 
             if average == 1:
-                return rawSweeps[1:]
+                return rawSweeps
 
             sweeps = []
-            for i, s in enumerate(rawSweeps[1:]):
+            for i, s in enumerate(rawSweeps):
                 if (i % average) == 0:
                     sweep = copy.deepcopy(s)
                     nAvg = 1.
-                    continue
+                else:             
+                    sweep.amp = sweep.amp + s.amp
+                    nAvg = nAvg + 1.
                 
-                sweep.amp = sweep.amp + s.amp
-                sweep.timeH = sweep.timeH + s.timeH
-                sweep.timeL = sweep.timeL + s.timeL
-                nAvg = nAvg + 1.
-                
-                if (i % average) == (average-1) or i == len(rawSweeps)-2:
+                if (i % average) == (average-1) or i == len(rawSweeps)-1:
                     sweep.amp = sweep.amp/nAvg
-                    sweep.timeH = int(sweep.timeH/nAvg)
-                    sweep.timeL = int(sweep.timeL/nAvg)
+                    sweep.timeH = s.timeH
+                    sweep.timeL = s.timeL
                     sweep.evtCounts = int(nAvg + 0.5)
                     sweeps.append(sweep)
                     continue
@@ -305,10 +323,12 @@ class TEPolCalculator:
         self.P_factor = self.nucleon_mag_moment*self.proton_g/self.boltzmann
         self.D_factor = self.nucleon_mag_moment*self.deutron_g/self.boltzmann
 
-    def calcTEPol(self, P, B = 5., spin = 0.5, par = 'P'):
-        T = self.calcT(P)
-        if T < 0.:
-            return 0.
+    def calcTEPol(self, P = None, T = None, B = 5., spin = 0.5, par = 'P'):
+        """T can either be calculated from the pressure or provided in the arg"""
+        if T is None:
+            T = self.calcT(P)
+            if T < 0.:
+                return 0.
 
         arg1 = (2.*spin + 1.)/spin/2.
         arg2 = 1./spin/2.
@@ -820,10 +840,10 @@ if __name__ == '__main__':
     parser.add_option('--port', type = 'int', dest = 'port', help = 'port number', default = 10000)
     parser.add_option('--log', type = 'string', dest = 'logfile', help = 'log file path', default = '')
     parser.add_option('--loglevel', type = 'string', dest = 'loglevel', help = 'log output level', default = 'info')
-    parser.add_option('--mode', type = 'string', dest = 'mode', help = 'bkg subtraction method', default = 'spline')
+    parser.add_option('--mode', type = 'string', dest = 'mode', help = 'bkg subtraction method (spline, cheby3, poly3)', default = 'spline')
     parser.add_option('--qcvless', action = 'store_true', dest = 'qcvless', help = 'Enable the qcurve less mode', default = False)
     parser.add_option('--qcvpath', type = 'string', dest = 'qcvpath', help = 'path where qcv file is stored', default = './')
-    parser.add_option('--qcvfile', type = 'string', dest = 'qcvfile', help = 'default qcurve file', default = 'QCV3563809315.csv')
+    parser.add_option('--qcvfile', type = 'string', dest = 'qcvfile', help = 'default qcurve file', default = '')
     (options, args) = parser.parse_args()
 
     logger.init(options)
