@@ -673,7 +673,7 @@ class NMRFastAna:
         self.signal.integral = self.signal.getArea(adjustedCenter - self.freqWin, adjustedCenter + self.freqWin)
 
         # check the status of the bkg-subtraction
-        self.signal.status = 0
+        self.signal.status = 1
         # sidebandSlopeL = (self.subtractedY[RsidebandSliceL[-1]] - self.subtractedY[RsidebandSliceL[0]])/(self.subtractedX[RsidebandSliceL[-1]] - self.subtractedX[RsidebandSliceL[0]])
         # sidebandSlopeR = (self.subtractedY[RsidebandSliceR[-1]] - self.subtractedY[RsidebandSliceR[0]])/(self.subtractedX[RsidebandSliceR[-1]] - self.subtractedX[RsidebandSliceR[0]])
         # if abs(sidebandSlopeL - sidebandSlopeR)/(abs(sidebandSlopeL) + abs(sidebandSlopeR)) < 1.:
